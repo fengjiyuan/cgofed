@@ -206,7 +206,7 @@ def get_data(seed=0, pc_valid=0.10, clients_num=10, task_num=5):
         # ===== Dirichlet Non-IID 划分实现结束 =====
         return data_set, taskcla_list
 
-def get_data(seed=0, pc_valid=0.10, clients_num=10, task_num=5):
+def get_data2(seed=0, pc_valid=0.10, clients_num=10, task_num=5):
     data = {}
     size = [3, 32, 32]
     if not os.path.isdir(file_dir):
@@ -395,7 +395,7 @@ def get_data(seed=0, pc_valid=0.10, clients_num=10, task_num=5):
         # ===== Dirichlet Non-IID 划分实现结束 =====
         return data_set, taskcla_list
 
-        
+
 # def get(seed=0, pc_valid=0.10):
 #     data = {}
 #     taskcla = []
