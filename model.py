@@ -87,9 +87,11 @@ class AlexNet(nn.Module):
         x = self.drop2(self.relu(self.bn5(x)))
         # feature_x = x
         y = []
-        for t, i in self.taskcla:
-            y.append(self.fc3[t](x))
-
+        # for t, i in self.taskcla:
+        #     y.append(self.fc3[t](x))
+        # 用 enumerate 的 idx 来索引 ModuleList
+        for idx, (t, n) in enumerate(self.taskcla):
+            y.append(self.fc3[idx](x))
         return y, feature_x
 
 
