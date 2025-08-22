@@ -16,6 +16,7 @@ You can install the required libraries via:
 
 ```bash
 pip install -r requirements.txt
+nohup python -u main_cifar.py > result.txt 2>&1 &
 ```
 
 ## Running the Code
