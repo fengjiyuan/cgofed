@@ -16,7 +16,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='CGoFed')   
     parser.add_argument('--seed', type=int, default=2023, metavar='S',
                         help='random seed (default: 1)')
-    parser.add_argument('--device', default=0, type=int,
+    parser.add_argument('--device', default=1, type=int,
                         help='GPU ID, -1 for CPU')
     parser.add_argument('--batch_size_train', type=int, default=64, metavar='N',
                         help='input batch size for training (default: 64)')
@@ -26,7 +26,7 @@ if __name__ == "__main__":
                         help='fraction of training data used for validation')
     parser.add_argument('--l_epochs', type=int, default=5, metavar='N',
                         help='number of training epochs/task (default: 200)')
-    parser.add_argument('--g_epochs', type=int, default=2, metavar='N',
+    parser.add_argument('--g_epochs', type=int, default=10, metavar='N',
                         help='number of global training epochs (default: 100)')
 
     # Optimizer parameters
@@ -62,12 +62,6 @@ if __name__ == "__main__":
                         help='the number of clients (default: 10)')
     parser.add_argument('--selected_clients', type=int, default=2,
                         help='history model of selected')
-    parser.add_argument('--local_epochs', type=int, default=50, metavar='N',
-                        help='the number of training epochs/clients (default: 1)')
-    parser.add_argument('--global_rounds', type=int, default=5, metavar='N',
-                        help='the number of training rounds/task (default: 5)')
-    parser.add_argument('--increment_mode', type=str, default='SL', metavar='N',
-                        help='incremental data is the same label or different labels (default: SL)')
     parser.add_argument('--test', type=bool, default=False, metavar='N',
                         help='incremental data is the same label or different labels (default: SL)')
 
@@ -97,7 +91,7 @@ if __name__ == "__main__":
     model_g = []
 
     # 一次性将10个客户端的数据分好
-    data_set, taskcla_list = cf100.new_get(seed=args.seed, pc_valid=args.pc_valid, clients_num=args.clients_num,
+    data_set, taskcla_list = cf100.get_data(seed=args.seed, pc_valid=args.pc_valid, clients_num=args.clients_num,
                                         task_num=args.task_num)
 
     # 通过循环来给每个客户端分配数据集
