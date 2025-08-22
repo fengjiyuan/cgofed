@@ -93,3 +93,80 @@ class AlexNet(nn.Module):
         return y, feature_x
 
 
+class AlexNet_Tiny(nn.Module):
+    def __init__(self,taskcla):
+        super(AlexNet_Tiny, self).__init__()
+        self.act=OrderedDict()
+        self.map =[]
+        self.ksize=[]
+        self.in_channel =[]
+        self.map.append(32)
+        self.conv1 = nn.Conv2d(3, 64, 4, bias=False)
+        self.bn1 = nn.BatchNorm2d(64, track_running_stats=False)
+        s=compute_conv_output_size(64,4)   # 尝试改这里
+        s=s//2
+        self.ksize.append(4)
+        self.in_channel.append(3)
+        self.map.append(s)
+        self.conv2 = nn.Conv2d(64, 128, 3, bias=False)
+        self.bn2 = nn.BatchNorm2d(128, track_running_stats=False)
+        s=compute_conv_output_size(s,3)
+        s=s//2
+        self.ksize.append(3)
+        self.in_channel.append(64)
+        self.map.append(s)
+        self.conv3 = nn.Conv2d(128, 256, 2, bias=False)
+        self.bn3 = nn.BatchNorm2d(256, track_running_stats=False)
+        s=compute_conv_output_size(s,2)
+        s=s//2
+        self.smid=s
+        self.ksize.append(2)
+        self.in_channel.append(128)
+        self.map.append(256*self.smid*self.smid)
+        self.maxpool=torch.nn.MaxPool2d(2)
+        self.relu=torch.nn.ReLU()
+        self.drop1=torch.nn.Dropout(0.2)
+        self.drop2=torch.nn.Dropout(0.5)
+
+        self.fc1 = nn.Linear(256*self.smid*self.smid,2048, bias=False)
+        self.bn4 = nn.BatchNorm1d(2048, track_running_stats=False)
+        self.fc2 = nn.Linear(2048,2048, bias=False)
+        self.bn5 = nn.BatchNorm1d(2048, track_running_stats=False)
+        self.map.extend([2048])
+        
+        self.taskcla = taskcla
+        self.fc3=torch.nn.ModuleList()
+        for t,n in self.taskcla:
+            self.fc3.append(torch.nn.Linear(2048,n,bias=False))
+        
+    def forward(self, x):
+        bsz = deepcopy(x.size(0))
+        x = x.to(torch.float32)
+        self.act['conv1']=x  # [64,3,32,32]
+        x = self.conv1(x)       # [64,64,29,29]
+        x = self.maxpool(self.drop1(self.relu(self.bn1(x))))   # [64,64,14,14]
+
+        self.act['conv2']=x  
+        x = self.conv2(x)    # [64,128,12,12]
+        x = self.maxpool(self.drop1(self.relu(self.bn2(x))))   # [64,128,6,6]
+
+        self.act['conv3']=x
+        x = self.conv3(x)    # [64,256,5,5]
+        x = self.maxpool(self.drop2(self.relu(self.bn3(x))))   # [64,256,2,2]
+
+        x=x.reshape(bsz,-1)  # [64,1024]  [64,9216]
+        self.act['fc1']=x
+        x = self.fc1(x)      # [64,2048]
+        x = self.drop2(self.relu(self.bn4(x)))                 # [64,2048]
+
+        self.act['fc2']=x        
+        feature_x = x
+        x = self.fc2(x)
+        x = self.drop2(self.relu(self.bn5(x)))
+        # feature_x = x
+        y=[]
+        for t,i in self.taskcla:
+            # y_tem = self.fc3[t](x).to(torch.int64)
+            y.append(self.fc3[t](x))
+        
+        return y, feature_x
