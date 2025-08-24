@@ -170,8 +170,10 @@ def test(args, model, device, x, y, criterion, task_id):
             data = x[b]
             data, target = data.to(device), y[b].to(device)
             output, _ = model(data)
-            loss = criterion(output[task_id], target)
-            pred = output[task_id].argmax(dim=1, keepdim=True)
+            head_idx = model.tid2head[int(task_id)]   # ★ 把真实任务ID映射到位置索引
+            logits = output[head_idx]
+            loss = criterion(logits, target)
+            pred = logits.argmax(dim=1, keepdim=True)
 
             correct += pred.eq(target.view_as(pred)).sum().item()
             total_loss += loss.data.cpu().numpy().item() * len(b)
@@ -232,7 +234,8 @@ class Regularization(torch.nn.Module):
         '''
         # selected_old_weight = select_old_model(index, ID, selected_clients_num)
         reg_loss = 0
-        for (name1, w1), (name2, w2) in zip(weight_list, old_model_list):
-            l2_reg = torch.norm(w1 - w2, p=p)
-            reg_loss = reg_loss + l2_reg
+        for (name1, w_cur), (name2, w_old) in zip(weight_list, old_model_list):
+            # 确保旧权重与当前权重在同一 device / dtype，且不参与梯度
+            w_old = w_old.to(device=w_cur.device, dtype=w_cur.dtype).detach()
+            reg_loss = reg_loss + torch.norm(w_cur - w_old, p=p)
         return reg_loss
