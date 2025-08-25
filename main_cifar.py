@@ -16,7 +16,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='CGoFed')   
     parser.add_argument('--seed', type=int, default=2023, metavar='S',
                         help='random seed (default: 1)')
-    parser.add_argument('--device', default=1, type=int,
+    parser.add_argument('--device', default=0, type=int,
                         help='GPU ID, -1 for CPU')
     parser.add_argument('--batch_size_train', type=int, default=64, metavar='N',
                         help='input batch size for training (default: 64)')
@@ -24,13 +24,13 @@ if __name__ == "__main__":
                         help='input batch size for testing (default: 64)')
     parser.add_argument('--pc_valid', default=0.05, type=float,
                         help='fraction of training data used for validation')
-    parser.add_argument('--l_epochs', type=int, default=5, metavar='N',
+    parser.add_argument('--l_epochs', type=int, default=3, metavar='N',
                         help='number of training epochs/task (default: 200)')
-    parser.add_argument('--g_epochs', type=int, default=10, metavar='N',
+    parser.add_argument('--g_epochs', type=int, default=20, metavar='N',
                         help='number of global training epochs (default: 100)')
 
     # Optimizer parameters
-    parser.add_argument('--lr', type=float, default=0.01, metavar='LR',
+    parser.add_argument('--lr', type=float, default=0.005, metavar='LR',
                         help='learning rate (default: 0.01)')
     parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
                         help='SGD momentum (default: 0.9)')
@@ -58,7 +58,7 @@ if __name__ == "__main__":
     # FL specific
     parser.add_argument('--task_num', type=int, default=10,
                         help='the number of task (default: 10)')
-    parser.add_argument('--clients_num', type=int, default=10,
+    parser.add_argument('--clients_num', type=int, default=5,
                         help='the number of clients (default: 10)')
     parser.add_argument('--selected_clients', type=int, default=2,
                         help='history model of selected')
@@ -83,7 +83,7 @@ if __name__ == "__main__":
     print('=' * 100)
 
     # initial clients
-    acc_matrix = np.zeros((10, 10))
+    acc_matrix = np.zeros((args.task_num, args.task_num))
     data_set = []
     taskcla_list = []
     task_list = []
@@ -91,7 +91,7 @@ if __name__ == "__main__":
     model_g = []
 
     # 一次性将10个客户端的数据分好
-    data_set, taskcla_list = cf100.get_data(seed=args.seed, pc_valid=args.pc_valid, clients_num=args.clients_num,
+    data_set, taskcla_list = cf100.get_data2(seed=args.seed, pc_valid=args.pc_valid, clients_num=args.clients_num,
                                         task_num=args.task_num)
 
     # 通过循环来给每个客户端分配数据集
@@ -136,7 +136,7 @@ if __name__ == "__main__":
 
                 if task_id == 0:
                     clients[c_id].train_first_task(args, xtrain, ytrain, xvalid, yvalid, task_id, device, threshold,
-                                                   c_id, epoch)
+                                                   c_id, epoch, g_epochs)
                 else:
                     old_model_list = select_old_model(clients, c_id, task_id, args.clients_num,
                                                       args.selected_clients)  # @ corss_task_module
@@ -150,7 +150,7 @@ if __name__ == "__main__":
                 if epoch == g_epochs - 1:
                     compute_distance_with_history_AvgProto(c_id, clients, args.clients_num, task_id)
 
-                    # personalized aggregation
+            # personalized aggregation
             avg_test_acc = 0
             avg_test_loss = 0
             for c_id in range(args.clients_num):
