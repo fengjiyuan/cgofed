@@ -283,43 +283,84 @@ def get_data2(seed=0, pc_valid=0.10, clients_num=10, task_num=5):
         data[t]['train']['y'] = data[t]['train']['y'][itrain].clone()
 
     # 现在要将训练集和验证集分为若干个客户端
-    # 统计每个任务训练集，测试集，验证集的样本总数
-    avg_num_train = len(data[i]['train']['y'].numpy()) / clients_num
-    avg_num_test = len(data[i]['test']['y'].numpy()) / clients_num
-    avg_num_valid = len(data[i]['valid']['y'].numpy()) / clients_num
-
     noniid = True
     if noniid == False:
+        # ---------- Helper：随机打散 + 余数均分 ----------
+        def _iid_equal_split_indices(n_samples: int, n_clients: int, seed: int):
+            rng = np.random.default_rng(seed)
+            all_idx = np.arange(n_samples)
+            rng.shuffle(all_idx)
+            base = n_samples // n_clients
+            rem  = n_samples % n_clients
+            parts = []
+            start = 0
+            for cid in range(n_clients):
+                extra = 1 if cid < rem else 0
+                end = start + base + extra
+                parts.append(all_idx[start:end])
+                start = end
+            return parts  # List[np.ndarray], 按客户端顺序排列
+
+        # ---------- 预先为每个任务/每个 split 计算好 IID 切片索引 ----------
+        iid_parts = {}
+        for t in data.keys():
+            iid_parts[t] = {}
+            # train
+            n_tr = data[t]['train']['y'].size(0)
+            iid_parts[t]['train'] = _iid_equal_split_indices(n_tr, clients_num, seed=seed + 101*(t+1))
+            # valid
+            n_va = data[t]['valid']['y'].size(0)
+            iid_parts[t]['valid'] = _iid_equal_split_indices(n_va, clients_num, seed=seed + 203*(t+1))
+            # test
+            n_te = data[t]['test']['y'].size(0)
+            iid_parts[t]['test']  = _iid_equal_split_indices(n_te, clients_num, seed=seed + 307*(t+1))
+
+        # ---------- 组装每个客户端的数据（严格按其 task_list 顺序） ----------
         for c_id in range(clients_num):
             client_data = {}
             true_t= 0
             # 将data的数据拆分为client_data
             for t in task_list[c_id]:
                 client_data[true_t] = dict.fromkeys(['name', 'ncla', 'train', 'test', 'valid'])
-                client_data[true_t]['ncla'] = len(np.unique(data[0]['train']['y'].numpy()))
-                client_data[true_t]['train'] = {'x': [], 'y': []}
-                client_data[true_t]['test'] = {'x': [], 'y': []}
-                client_data[true_t]['valid'] = {'x': [], 'y': []}
-                client_data[true_t]['train']['x'] = data[t]['train']['x'][int(c_id * avg_num_train):int((c_id + 1) * avg_num_train)]
-                client_data[true_t]['train']['y'] = data[t]['train']['y'][int(c_id * avg_num_train):int((c_id + 1) * avg_num_train)]
-                client_data[true_t]['test']['x']  = data[t]['test']['x'][int(c_id * avg_num_test):int((c_id + 1) * avg_num_test)]
-                client_data[true_t]['test']['y']  = data[t]['test']['y'][int(c_id * avg_num_test):int((c_id + 1) * avg_num_test)]
-                client_data[true_t]['valid']['x'] = data[t]['valid']['x'][int(c_id * avg_num_valid):int((c_id + 1) * avg_num_valid)]
-                client_data[true_t]['valid']['y'] = data[t]['valid']['y'][int(c_id * avg_num_valid):int((c_id + 1) * avg_num_valid)]
-                if client_data[true_t]['ncla'] == 2:
-                    client_data[true_t]['name'] = 'cifar10-' + str(t)
-                else:
-                    client_data[true_t]['name'] = 'cifar100-' + str(t)
-                    # Others
-                true_t = true_t + 1
-            n = 0
+
+                # 该客户端在任务 t 的索引切片（IID 等分后的第 c_id 份）
+                tr_idx = iid_parts[t]['train'][c_id]
+                va_idx = iid_parts[t]['valid'][c_id]
+                te_idx = iid_parts[t]['test'][c_id]
+
+                # 写入数据（clone 防止后续原地修改）
+                client_data[true_t]['train'] = {
+                    'x': data[t]['train']['x'][tr_idx].clone(),
+                    'y': data[t]['train']['y'][tr_idx].clone(),
+                }
+                client_data[true_t]['valid'] = {
+                    'x': data[t]['valid']['x'][va_idx].clone(),
+                    'y': data[t]['valid']['y'][va_idx].clone(),
+                }
+                client_data[true_t]['test'] = {
+                    'x': data[t]['test']['x'][te_idx].clone(),
+                    'y': data[t]['test']['y'][te_idx].clone(),
+                }
+                # 元信息（用任务 t 的全局统计）
+                ncla_t = int(data[t]['ncla'])
+                client_data[true_t]['ncla'] = ncla_t
+                client_data[true_t]['name'] = ('cifar10-' if ncla_t == 2 else 'cifar100-') + str(t)
+
+                true_t += 1
+
+            # 汇总该客户端的 taskcla / ncla
+            n_total = 0
             taskcla = []
-            for t in client_data.keys():
-                taskcla.append((t, client_data[t]['ncla']))
-                n += client_data[t]['ncla']
-            client_data['ncla'] = n
+            for tt in client_data.keys():
+                if tt == 'ncla':  # 防误扫
+                    continue
+                taskcla.append((tt, client_data[tt]['ncla']))
+                n_total += client_data[tt]['ncla']
+            client_data['ncla'] = n_total
+
             data_set.append(client_data)
             taskcla_list.append(taskcla)
+
         return data_set, taskcla_list
 
     else:
