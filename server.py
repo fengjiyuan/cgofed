@@ -87,32 +87,32 @@ def select_old_model(clients, curr_i, task_id, clients_participant, selected_cli
     return old_weight_list
 
 
-def p_avg(curr_i, clients_participant, clients):
-    # 先归一化，然后计算出权重
-    dis_sum = 0.
-    dis = clients[curr_i].dis_with_other
-    max_dis = max(dis)
-    min_dis = min(filter(lambda x: x > 0, dis))
-    for i in range(len(dis)):
-        if dis[i] != 0:
-            dis[i] = (dis[i] - min_dis) / (max_dis - min_dis)
-    # 取倒数求和
-    for i in range(len(dis)):
-        if dis[i] != 0:
-            dis_sum += 1.0 / dis[i]
-            # 然后求权重
-    for i in range(clients_participant):
-        if dis[i] != 0:
-            clients[curr_i].dis_with_other[i] = (1.0 / dis[i]) / dis_sum
+# def p_avg(curr_i, clients_participant, clients):
+#     # 先归一化，然后计算出权重
+#     dis_sum = 0.
+#     dis = clients[curr_i].dis_with_other
+#     max_dis = max(dis)
+#     min_dis = min(filter(lambda x: x > 0, dis))
+#     for i in range(len(dis)):
+#         if dis[i] != 0:
+#             dis[i] = (dis[i] - min_dis) / (max_dis - min_dis)
+#     # 取倒数求和
+#     for i in range(len(dis)):
+#         if dis[i] != 0:
+#             dis_sum += 1.0 / dis[i]
+#             # 然后求权重
+#     for i in range(clients_participant):
+#         if dis[i] != 0:
+#             clients[curr_i].dis_with_other[i] = (1.0 / dis[i]) / dis_sum
 
-    w_g_personalized = copy.deepcopy(clients[curr_i].model.state_dict())
-    w_g_personalized.update(
-        (key, value * 0.8) for key, value in w_g_personalized.items())  # 个性化聚合中，自己的模型占一半权重，其他客户端的所有模型，占一半权重
-    for k in w_g_personalized.keys():
-        for i in range(clients_participant):  # 遍历本轮的所有客户端
-            if i != curr_i and str(clients[i].model.state_dict()[k].dtype) == 'torch.float32':  # 排除客户端curr_i自己
-                w_g_personalized[k] += 0.2 * clients[curr_i].dis_with_other[i] * clients[i].model.state_dict()[k]
-    return w_g_personalized
+#     w_g_personalized = copy.deepcopy(clients[curr_i].model.state_dict())
+#     w_g_personalized.update(
+#         (key, value * 0.8) for key, value in w_g_personalized.items())  # 个性化聚合中，自己的模型占一半权重，其他客户端的所有模型，占一半权重
+#     for k in w_g_personalized.keys():
+#         for i in range(clients_participant):  # 遍历本轮的所有客户端
+#             if i != curr_i and str(clients[i].model.state_dict()[k].dtype) == 'torch.float32':  # 排除客户端curr_i自己
+#                 w_g_personalized[k] += 0.2 * clients[curr_i].dis_with_other[i] * clients[i].model.state_dict()[k]
+#     return w_g_personalized
 
 
 def PFL(curr_i, clients, clients_num):
@@ -135,11 +135,11 @@ def PFL(curr_i, clients, clients_num):
 
     w_g_personalized = copy.deepcopy(clients[curr_i].model.state_dict())
     w_g_personalized.update(
-        (key, value * 0.8) for key, value in w_g_personalized.items())  # 个性化聚合中，自己的模型占一半权重，其他客户端的所有模型，占一半权重
+        (key, value * 0.9) for key, value in w_g_personalized.items())  # 个性化聚合中，自己的模型占一半权重，其他客户端的所有模型，占一半权重
     for k in w_g_personalized.keys():
         for i in range(clients_num):  # 遍历本轮的所有客户端
             if i != curr_i and str(clients[i].model.state_dict()[k].dtype) == 'torch.float32':  # 排除客户端curr_i自己
-                w_g_personalized[k] += 0.2 * clients[curr_i].dis_with_other[i] * clients[i].model.state_dict()[k]
+                w_g_personalized[k] += 0.1 * clients[curr_i].dis_with_other[i] * clients[i].model.state_dict()[k]
     return w_g_personalized
 
 
