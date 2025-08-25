@@ -48,8 +48,8 @@ class AlexNet(nn.Module):
         self.map.append(256 * self.smid * self.smid)
         self.maxpool = torch.nn.MaxPool2d(2)
         self.relu = torch.nn.ReLU()
-        self.drop1 = torch.nn.Dropout(0.2)
-        self.drop2 = torch.nn.Dropout(0.5)
+        self.drop1 = torch.nn.Dropout(0.3)
+        self.drop2 = torch.nn.Dropout(0.6)
 
         self.fc1 = nn.Linear(256 * self.smid * self.smid, 2048, bias=False)
         self.bn4 = nn.BatchNorm1d(2048, track_running_stats=False)
@@ -61,7 +61,9 @@ class AlexNet(nn.Module):
         self.fc3 = torch.nn.ModuleList()
         for t, n in self.taskcla:
             self.fc3.append(torch.nn.Linear(2048, n, bias=False))
+        self.tid2head = {t: idx for idx, (t, _) in enumerate(taskcla)}   # ★ 新增
 
+        
     def forward(self, x):
         bsz = deepcopy(x.size(0))
         self.act['conv1'] = x
