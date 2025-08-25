@@ -18,141 +18,119 @@ import seaborn as sn
 import pandas as pd
 import random
 import pdb
+import math
 import time
 from copy import deepcopy
 from server import *
 from model import *
 from server import Regularization
 
+def get_model(model):
+    return deepcopy(model.state_dict())
 
-def train(args, model, device, x, y, optimizer, criterion, task_id):
+def set_model_(model, state_dict):
+    model.load_state_dict(deepcopy(state_dict))
+    return
+
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
+
+def train(args, model, device, x, y, optimizer, scheduler, criterion, task_id):
     model.train()
-    r = np.arange(x.size(0))
-    np.random.shuffle(r)
-    r = torch.LongTensor(r)
-    # Loop batches
-    for i in range(0, len(r), args.batch_size_train):
-        if i + args.batch_size_train <= len(r):
-            b = r[i:i + args.batch_size_train]
-        else:
-            b = r[i:]
-        data = x[b]
-        data, target = data.to(device), y[b].to(device)
-        optimizer.zero_grad()
+    # 用 torch 打乱索引
+    num_samples = x.size(0)
+    indices = torch.randperm(num_samples)
+
+    Proto = None          
+    for i in range(0, num_samples, args.batch_size_train):   
+        b = indices[i: min(i + args.batch_size_train, num_samples)]
+        data   = x[b].to(device, non_blocking=True)
+        target = y[b].to(device, non_blocking=True)
+        # --- Mixup 增强 ---
+        data, targets_a, targets_b, lam = mixup_data(data, target, alpha=0.2, device=device)
+
+        optimizer.zero_grad(set_to_none=True)
         output, proto = model(data)
-        loss = criterion(output[task_id], target)
+
+        head_idx = model.tid2head[int(task_id)]   # ★ 把真实任务ID映射到位置索引
+        logits = output[head_idx]
+        # --- Mixup loss ---
+        loss = mixup_criterion(criterion, logits, targets_a, targets_b, lam)
+        # loss = criterion(logits, target)
         loss.backward()
         optimizer.step()
         # 保存特征图
-        if i == 0:
+        if Proto is None:
             Proto = proto
         else:
             Proto = torch.cat((Proto, proto), dim=0)
+    scheduler.step()
     return Proto
 
-
-def train_projected(args, model, device, x, y, optimizer, criterion, feature_mat, task_id, reg_loss, avg_forgetting):
+def train_projected(args, model, device, x, y, optimizer, scheduler, criterion, feature_mat, task_id, reg_loss, avg_forgetting):
     model.train()
-    r = np.arange(x.size(0))
-    np.random.shuffle(r)
-    r = torch.LongTensor(r)
+    num_samples = x.size(0)
+    indices = torch.randperm(num_samples)   # 用 torch 打乱索引
+    
     scale_value = task_id
-    # Loop batches
-    for i in range(0, len(r), args.batch_size_train):
-        if i + args.batch_size_train <= len(r):
-            b = r[i:i + args.batch_size_train]
-        else:
-            b = r[i:]
-        data = x[b]
-        data, target = data.to(device), y[b].to(device)
-        optimizer.zero_grad()
-        output, proto = model(data)
-        local_loss_value = criterion(output[task_id], target)
+    Proto = None
 
-        # 在这里读取旧任务的模型，并计算正则化损失
+    for i in range(0, num_samples, args.batch_size_train):
+        b = indices[i: min(i + args.batch_size_train, num_samples)]
+        data = x[b].to(device, non_blocking=True)
+        target = y[b].to(device, non_blocking=True)
+
+        # --- Mixup 增强 ---
+        data, targets_a, targets_b, lam = mixup_data(data, target, alpha=0.2, device=device)
+
+        optimizer.zero_grad(set_to_none=True)
+        output, proto = model(data)
+        head_idx = model.tid2head[int(task_id)]
+        logits = output[head_idx]
+
+        # --- Mixup loss ---
+        local_loss_value = mixup_criterion(criterion, logits, targets_a, targets_b, lam)
+
+        # 正则化损失
         reg_loss_value = reg_loss(model)
-        b1 = len(str(int(local_loss_value * 1000000)))
-        b2 = len(str(int(reg_loss_value * 1000000)))
-        loss_value = local_loss_value + reg_loss_value / (10 ** (b2 - b1 + 2)) * 2  # 加入正则化项的损失
+
+        # 将正则化项缩放后加入
+        b1 = len(str(int(local_loss_value * 1e6)))
+        b2 = len(str(int(reg_loss_value * 1e6)))
+        loss_value = local_loss_value + reg_loss_value / (10 ** (b2 - b1 + 2)) * 2
 
         loss_value.backward()
-        # Gradient Projections    %%%
+
+        # Gradient Projection
         kk = 0
-        initial_mu = 1.0  # Initial projection strength
-        decay_rate = args.alpha  # Decay rate per iteration
+        initial_mu = 1.0
+        decay_rate = args.alpha
         max_scale_value = task_id
-        # print("sum(avg_forgetting) / len(avg_forgetting)", sum(avg_forgetting) / len(avg_forgetting))
-        # if sum(avg_forgetting) / len(avg_forgetting) < args.tau:
-        # print("avg_forgetting", avg_forgetting[-1])
+
         if avg_forgetting[-1] < args.tau:
             mu = initial_mu * (decay_rate ** task_id)
-            # print("tau", args.tau, mu)
         else:
             scale_value = task_id - max_scale_value + 1
             mu = initial_mu * (decay_rate ** scale_value)
-            # print("tau", args.tau, mu)
 
         for k, (m, params) in enumerate(model.named_parameters()):
             if k < 15 and len(params.size()) != 1:
                 sz = params.grad.data.size(0)
-                params.grad.data = params.grad.data - mu * torch.mm(params.grad.data.view(sz, -1), \
-                                                                    feature_mat[kk]).view(params.size())
+                params.grad.data = params.grad.data - mu * torch.mm(
+                    params.grad.data.view(sz, -1), feature_mat[kk]
+                ).view(params.size())
                 kk += 1
             elif (k < 15 and len(params.size()) == 1) and task_id != 0:
                 params.grad.data.fill_(0)
         optimizer.step()
         # 保存特征图
-        if i == 0:
+        if Proto is None:
             Proto = proto
         else:
             Proto = torch.cat((Proto, proto), dim=0)
+    scheduler.step()
     return Proto
-
-
-def test(args, model, device, x, y, criterion, task_id):
-    model.eval()
-    total_loss = 0
-    total_num = 0
-    correct = 0
-    r = np.arange(x.size(0))
-    np.random.shuffle(r)
-    r = torch.LongTensor(r)
-    with torch.no_grad():
-        # Loop batches
-        for i in range(0, len(r), args.batch_size_test):
-            if i + args.batch_size_test <= len(r):
-                b = r[i:i + args.batch_size_test]
-            else:
-                b = r[i:]
-            data = x[b]
-            data, target = data.to(device), y[b].to(device)
-            output, _ = model(data)
-            loss = criterion(output[task_id], target)
-            pred = output[task_id].argmax(dim=1, keepdim=True)
-
-            correct += pred.eq(target.view_as(pred)).sum().item()
-            total_loss += loss.data.cpu().numpy().item() * len(b)
-            total_num += len(b)
-
-    acc = 100. * correct / total_num
-    final_loss = total_loss / total_num
-    return final_loss, acc
-
-
-# def adjust_learning_rate(optimizer, epoch, lr, lr_factor):
-#     for param_group in optimizer.param_groups:
-#         if (epoch ==1):
-#             param_group['lr']=lr
-#         else:
-#             param_group['lr'] /= lr_factor
-
-def get_model(model):
-    return deepcopy(model.state_dict())
-
-
-def set_model_(model, state_dict):
-    model.load_state_dict(deepcopy(state_dict))
-    return
 
 
 def get_grad_matrix(net, device, x, y=None):
@@ -160,7 +138,7 @@ def get_grad_matrix(net, device, x, y=None):
     r = np.arange(x.size(0))  # 样本数量
     np.random.shuffle(r)
     r = torch.LongTensor(r)
-    b = r[0:125]  # Take 125 random samples
+    b = r[0:250]  # Take 125 random samples
     example_data = x[b]
     example_data = example_data.to(device)
     example_out = net(example_data)
@@ -213,10 +191,6 @@ def update_grad_basis(grad_list, threshold, grad_basis=[]):
             else:
                 grad_basis[i] = Ui
     return grad_basis
-
-
-def sigmoid(x):
-    return 1 / (1 + np.exp(-x))
 
 
 def update_grad_basis_calculate_important_sigmoid(args, grad_list, threshold, task_id, grad_basis=[],
@@ -294,6 +268,180 @@ def update_grad_basis_calculate_important_sigmoid(args, grad_list, threshold, ta
     return grad_basis, importance_list
 
 
+class Client:
+    def __init__(self, model, args):
+
+        super(Client, self).__init__()
+        # self.task_id = task_id
+        self.model = model
+        self.best_model = None
+        self.best_loss = np.inf
+        self.criterion = torch.nn.CrossEntropyLoss(label_smoothing=0.1)
+        self.patience = None
+        self.lr = args.lr
+        self.momentum = args.momentum
+
+        self.personalized_global_model = None
+        self.curr_AvgProto = []
+        self.history_AvgProto = []
+        self.history_dis = {}
+        self.dis_with_other = [0] * 30
+        self.history_model = []
+
+        self.grad_basis = []
+        self.importance_list = []
+
+    def train_first_task(self, args, xtrain, ytrain, xvalid, yvalid, task_id, device, threshold, c_id, curr_epoch, g_epoch):
+        self.model = self.model.to(device)
+        # optimizer = optim.SGD(self.model.parameters(), lr=self.lr)
+        optimizer = optim.SGD(self.model.parameters(), lr=self.lr, momentum=self.momentum, weight_decay=5e-4, nesterov=True)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.l_epochs, eta_min=args.lr_min)
+
+        feature_list = []
+        importance_list = []
+
+        for epoch in range(1, args.l_epochs + 1):
+            # Train
+            clock0 = time.time()
+            Proto = train(args, self.model, device, xtrain, ytrain, optimizer, scheduler, self.criterion, task_id)
+            clock1 = time.time()
+            tr_loss, tr_acc = test(args, self.model, device, xtrain, ytrain, self.criterion, task_id)
+            print('Epoch {:3d} | Client {:3d} | Train: loss={:.3f}, acc={:5.1f}% | time={:5.1f}ms |'.format(epoch, \
+                                                                                                            c_id,
+                                                                                                            tr_loss,
+                                                                                                            tr_acc,
+                                                                                                            1000 * (clock1 - clock0)),end='')
+            # Validate
+            valid_loss, valid_acc = test(args, self.model, device, xvalid, yvalid, self.criterion, task_id)
+            print(' Valid: loss={:.3f}, acc={:5.1f}% |'.format(valid_loss, valid_acc), end='')
+            print()
+
+        # 本地训练中，保存最后一个epoch的feature
+        self.curr_AvgProto = Proto.mean(dim=0).detach().cpu().numpy()
+        if curr_epoch == g_epoch - 1:
+            # 应该在所有的epochs结束之后返回特征和模型
+            self.history_AvgProto.append(self.curr_AvgProto)  # 保存历史类原型
+            # 深拷贝到CPU，避免后续被覆盖
+            sd = {k: t.detach().cpu().clone() for k, t in self.model.state_dict().items()}
+            self.history_model.append(sd)
+        # Memory Update   %%%
+        grad_list = get_grad_matrix(self.model, device, xtrain, ytrain)
+
+        if args.test == 1:
+            # print("no important")
+            self.grad_basis = update_grad_basis(grad_list, threshold, self.grad_basis)
+        else:
+            self.grad_basis, self.importance_list = update_grad_basis_calculate_important_sigmoid(args, grad_list,
+                                                                                                  threshold, task_id,
+                                                                                                  feature_list,
+                                                                                                  importance_list)
+        return
+
+    def train_new_task(self, args, xtrain, ytrain, xvalid, yvalid, task_id, device, threshold, c_id, old_model_list,
+                       g_epoch, avg_forgetting):
+        # optimizer = optim.SGD(self.model.parameters(), lr=self.lr)
+        optimizer = optim.SGD(self.model.parameters(), lr=self.lr, momentum=self.momentum, weight_decay=5e-4, nesterov=True)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.l_epochs, eta_min=args.lr_min)
+
+        reg_loss = Regularization(self.model, old_model_list, p=2).to(device)
+        feature_mat = []
+        # Projection Matrix Precomputation %%%
+        for i in range(len(self.model.act)):
+            # Uf改梯度
+            # Uf=torch.Tensor(np.dot(self.grad_basis[i],self.grad_basis[i].transpose())).to(device)
+            Uf = torch.Tensor(np.dot(self.grad_basis[i],
+                                     np.dot(np.diag(self.importance_list[i]), self.grad_basis[i].transpose()))).to(
+                device)
+            # print('Layer {} - Projection Matrix shape: {}'.format(i+1,Uf.shape))
+            Uf.requires_grad = False
+            feature_mat.append(Uf)
+        print('-' * 40)
+        for epoch in range(1, args.l_epochs + 1):
+            # Train
+            clock0 = time.time()
+            Proto = train_projected(args, self.model, device, xtrain, ytrain, optimizer, scheduler, self.criterion, feature_mat,
+                                    task_id, reg_loss, avg_forgetting)
+            clock1 = time.time()
+            tr_loss, tr_acc = test(args, self.model, device, xtrain, ytrain, self.criterion, task_id)
+            print('Epoch {:3d} | Client {:3d} | Train: loss={:.3f}, acc={:5.1f}% | time={:5.1f}ms |'.format(epoch, \
+                                                                                                            c_id,
+                                                                                                            tr_loss,
+                                                                                                            tr_acc,
+                                                                                                            1000 * (clock1 - clock0)),end='')
+            # Validate
+            valid_loss, valid_acc = test(args, self.model, device, xvalid, yvalid, self.criterion, task_id)
+            print(' Valid: loss={:.3f}, acc={:5.1f}% |'.format(valid_loss, valid_acc), end='')
+            print()
+
+        # 本地训练中，保存最后一个epoch的feature
+        self.curr_AvgProto = Proto.mean(dim=0).detach().cpu().numpy()
+        if g_epoch == args.g_epochs - 1:
+            # 应该在所有的epochs结束之后返回特征和模型
+            self.history_AvgProto.append(self.curr_AvgProto)  # 保存历史类原型
+            # 深拷贝到CPU，避免后续被覆盖
+            sd = {k: t.detach().cpu().clone() for k, t in self.model.state_dict().items()}
+            self.history_model.append(sd)
+        # Memory Update  %%%
+        grad_list = get_grad_matrix(self.model, device, xtrain, ytrain)
+        if args.test == True:
+            # print("no important")
+            self.grad_basis = update_grad_basis(grad_list, threshold, self.grad_basis)
+        else:
+            self.grad_basis, self.importance_list = update_grad_basis_calculate_important_sigmoid(args, grad_list,
+                                                                                                  threshold, task_id,
+                                                                                                  self.grad_basis,
+                                                                                                  self.importance_list)
+            # print("importance_list", self.importance_list)
+        return
+
+
+def calculate_average_forgetting(matrix, task_num):
+    n = len(matrix)
+    if n == 0:
+        return 0
+
+    total_difference = 0
+    for col in range(n):
+        max_value = max(row[col] for row in matrix)
+        last_value = matrix[task_num][col]
+        difference = max_value - last_value
+        total_difference += difference
+
+    average_difference = total_difference / ((task_num + 1) * 100)
+    return average_difference
+
+def mixup_data(x, y, alpha=0.2, device='cuda'):
+    '''返回混合后的样本和标签对'''
+    if alpha > 0:
+        lam = np.random.beta(alpha, alpha)
+    else:
+        lam = 1
+    batch_size = x.size()[0]
+    index = torch.randperm(batch_size).to(device)
+    mixed_x = lam * x + (1 - lam) * x[index, :]
+    y_a, y_b = y, y[index]
+    return mixed_x, y_a, y_b, lam
+
+def mixup_criterion(criterion, pred, y_a, y_b, lam):
+    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
+
+
+    # def vision_feature(model_params):
+
+
+#     layer_params = model_params
+#     plt.figure(figsize=(10, 10))
+#     # last_layer_params.cpu()
+# #     layer_params = [torch.tensor(param) for param in layer_params]
+#     i = 0
+#     for param in layer_params:
+#         plt.imshow(utils.make_grid(torch.tensor(param.cpu()), normalize=True).numpy().transpose((1, 2, 0)))
+#         plt.axis('off')
+#         plt.savefig("feature{}.png".format(i), dpi=300)
+#         plt.show()
+#         i = i+1
+#     return
+
 # def update_grad_basis_calculate_important (args, grad_list, threshold, task_id, grad_basis=[], importance_list=[]):
 #     # print ('Threshold: ', threshold)
 #     scale_coff = 10
@@ -366,154 +514,43 @@ def update_grad_basis_calculate_important_sigmoid(args, grad_list, threshold, ta
 
 #     return grad_basis,   importance_list
 
-class Client:
-    def __init__(self, model, args):
-
-        super(Client, self).__init__()
-        # self.task_id = task_id
-        self.model = model
-        self.best_model = None
-        self.best_loss = np.inf
-        self.criterion = torch.nn.CrossEntropyLoss()
-        self.patience = None
-        self.lr = args.lr
-
-        self.personalized_global_model = None
-        self.curr_AvgProto = []
-        self.history_AvgProto = []
-        self.history_dis = {}
-        self.dis_with_other = [0] * 30
-        self.history_model = []
-
-        self.grad_basis = []
-        self.importance_list = []
-
-    def train_first_task(self, args, xtrain, ytrain, xvalid, yvalid, task_id, device, threshold, c_id, g_epoch):
-        self.model = self.model.to(device)
-        optimizer = optim.SGD(self.model.parameters(), lr=self.lr)
-        feature_list = []
-        importance_list = []
-
-        for epoch in range(1, args.l_epochs + 1):
-            # Train
-            clock0 = time.time()
-            Proto = train(args, self.model, device, xtrain, ytrain, optimizer, self.criterion, task_id)
-            clock1 = time.time()
-            tr_loss, tr_acc = test(args, self.model, device, xtrain, ytrain, self.criterion, task_id)
-            print('Epoch {:3d} | Client {:3d} | Train: loss={:.3f}, acc={:5.1f}% | time={:5.1f}ms |'.format(epoch, \
-                                                                                                            c_id,
-                                                                                                            tr_loss,
-                                                                                                            tr_acc,
-                                                                                                            1000 * (
-                                                                                                                        clock1 - clock0)),
-                  end='')
-            # Validate
-            valid_loss, valid_acc = test(args, self.model, device, xvalid, yvalid, self.criterion, task_id)
-            print(' Valid: loss={:.3f}, acc={:5.1f}% |'.format(valid_loss, valid_acc), end='')
-            print()
-
-        # 本地训练中，保存最后一个epoch的feature
-        self.curr_AvgProto = Proto.mean(dim=0).detach().cpu().numpy()
-        if g_epoch == args.g_epochs - 1:
-            # 应该在所有的epochs结束之后返回特征和模型
-            self.history_AvgProto.append(self.curr_AvgProto)  # 保存历史类原型
-            self.history_model.append(self.model.state_dict())
-        # Memory Update   %%%
-        grad_list = get_grad_matrix(self.model, device, xtrain, ytrain)
-
-        if args.test == 1:
-            # print("no important")
-            self.grad_basis = update_grad_basis(grad_list, threshold, self.grad_basis)
-        else:
-            self.grad_basis, self.importance_list = update_grad_basis_calculate_important_sigmoid(args, grad_list,
-                                                                                                  threshold, task_id,
-                                                                                                  feature_list,
-                                                                                                  importance_list)
-            # print("importance_list", self.importance_list)
-        return
-
-    def train_new_task(self, args, xtrain, ytrain, xvalid, yvalid, task_id, device, threshold, c_id, old_model_list,
-                       g_epoch, avg_forgetting):
-        optimizer = optim.SGD(self.model.parameters(), lr=self.lr)
-        reg_loss = Regularization(self.model, old_model_list, p=2).to(device)
-        feature_mat = []
-        # Projection Matrix Precomputation %%%
-        for i in range(len(self.model.act)):
-            # Uf改梯度
-            # Uf=torch.Tensor(np.dot(self.grad_basis[i],self.grad_basis[i].transpose())).to(device)
-            Uf = torch.Tensor(np.dot(self.grad_basis[i],
-                                     np.dot(np.diag(self.importance_list[i]), self.grad_basis[i].transpose()))).to(
-                device)
-            # print('Layer {} - Projection Matrix shape: {}'.format(i+1,Uf.shape))
-            Uf.requires_grad = False
-            feature_mat.append(Uf)
-        print('-' * 40)
-        for epoch in range(1, args.l_epochs + 1):
-            # Train
-            clock0 = time.time()
-            Proto = train_projected(args, self.model, device, xtrain, ytrain, optimizer, self.criterion, feature_mat,
-                                    task_id, reg_loss, avg_forgetting)
-            clock1 = time.time()
-            tr_loss, tr_acc = test(args, self.model, device, xtrain, ytrain, self.criterion, task_id)
-            print('Epoch {:3d} | Client {:3d} | Train: loss={:.3f}, acc={:5.1f}% | time={:5.1f}ms |'.format(epoch, \
-                                                                                                            c_id,
-                                                                                                            tr_loss,
-                                                                                                            tr_acc,
-                                                                                                            1000 * (
-                                                                                                                        clock1 - clock0)),
-                  end='')
-            # Validate
-            valid_loss, valid_acc = test(args, self.model, device, xvalid, yvalid, self.criterion, task_id)
-            print(' Valid: loss={:.3f}, acc={:5.1f}% |'.format(valid_loss, valid_acc), end='')
-            print()
-
-        # 本地训练中，保存最后一个epoch的feature
-        self.curr_AvgProto = Proto.mean(dim=0).detach().cpu().numpy()
-        if g_epoch == args.g_epochs - 1:
-            # 应该在所有的epochs结束之后返回特征和模型
-            self.history_AvgProto.append(self.curr_AvgProto)  # 保存历史类原型
-            self.history_model.append(self.model.state_dict())
-        # Memory Update  %%%
-        grad_list = get_grad_matrix(self.model, device, xtrain, ytrain)
-        if args.test == True:
-            # print("no important")
-            self.grad_basis = update_grad_basis(grad_list, threshold, self.grad_basis)
-        else:
-            self.grad_basis, self.importance_list = update_grad_basis_calculate_important_sigmoid(args, grad_list,
-                                                                                                  threshold, task_id,
-                                                                                                  self.grad_basis,
-                                                                                                  self.importance_list)
-            # print("importance_list", self.importance_list)
-        return
-
-    # def vision_feature(model_params):
 
 
-#     layer_params = model_params
-#     plt.figure(figsize=(10, 10))
-#     # last_layer_params.cpu()
-# #     layer_params = [torch.tensor(param) for param in layer_params]
-#     i = 0
-#     for param in layer_params:
-#         plt.imshow(utils.make_grid(torch.tensor(param.cpu()), normalize=True).numpy().transpose((1, 2, 0)))
-#         plt.axis('off')
-#         plt.savefig("feature{}.png".format(i), dpi=300)
-#         plt.show()
-#         i = i+1
-#     return
+# def test(args, model, device, x, y, criterion, task_id):
+#     model.eval()
+#     total_loss = 0
+#     total_num = 0
+#     correct = 0
+#     r = np.arange(x.size(0))
+#     np.random.shuffle(r)
+#     r = torch.LongTensor(r)
+#     with torch.no_grad():
+#         # Loop batches
+#         for i in range(0, len(r), args.batch_size_test):
+#             if i + args.batch_size_test <= len(r):
+#                 b = r[i:i + args.batch_size_test]
+#             else:
+#                 b = r[i:]
+#             data = x[b]
+#             data, target = data.to(device), y[b].to(device)
+#             output, _ = model(data)
+#             head_idx = model.tid2head[int(task_id)]   # ★ 把真实任务ID映射到位置索引
+#             logits = output[head_idx]
+#             loss = criterion(logits, target)
+#             pred = logits.argmax(dim=1, keepdim=True)
+
+#             correct += pred.eq(target.view_as(pred)).sum().item()
+#             total_loss += loss.data.cpu().numpy().item() * len(b)
+#             total_num += len(b)
+
+#     acc = 100. * correct / total_num
+#     final_loss = total_loss / total_num
+#     return final_loss, acc
 
 
-def calculate_average_forgetting(matrix, task_num):
-    n = len(matrix)
-    if n == 0:
-        return 0
-
-    total_difference = 0
-    for col in range(n):
-        max_value = max(row[col] for row in matrix)
-        last_value = matrix[task_num][col]
-        difference = max_value - last_value
-        total_difference += difference
-
-    average_difference = total_difference / ((task_num + 1) * 100)
-    return average_difference
+# def adjust_learning_rate(optimizer, epoch, lr, lr_factor):
+#     for param_group in optimizer.param_groups:
+#         if (epoch ==1):
+#             param_group['lr']=lr
+#         else:
+#             param_group['lr'] /= lr_factor
